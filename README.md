@@ -44,17 +44,34 @@ Edit `NAME` (username) and the resource settings (`GPUS`, `MEMORY`, `CPUS`, `SHM
 # Build (first time, or after Dockerfile changes)
 bash docker-scripts/build.sh
 
-# Run: start a container, mount the current folder at /workspace, attach to tmux
+# Run: create a new container, mount the current folder at /workspace, attach to tmux
 bash docker-scripts/run.sh                 # auto-named: <name>-workspace-1, -2, ...
 bash docker-scripts/run.sh -s exp1         # named:      <name>-workspace-exp1
 bash docker-scripts/run.sh -d /path/to/dir # mount a different folder
 
-# Re-attach (after detaching or an SSH drop)
+# Attach: re-attach to a running container, or start a stopped one and attach
 bash docker-scripts/attach.sh <suffix>
 
-# Stop and remove a container (also deletes its inner Docker data)
+# Stop: stop the container but KEEP it and its inner Docker data
 bash docker-scripts/stop.sh <suffix>
+
+# Destroy: stop and REMOVE the container and all its inner Docker data
+bash docker-scripts/destroy.sh <suffix>
 ```
+
+### Data persistence
+
+| Data | `stop.sh` | `destroy.sh` |
+|------|-----------|--------------|
+| `/workspace` (your host folder) | Kept | Kept |
+| Inner Docker images, containers, volumes, build cache | Kept | **Deleted** |
+| Container filesystem outside `/workspace` (e.g. `pip install` done by hand) | Kept | **Deleted** |
+| tmux sessions and running processes | Lost | Lost |
+
+- Inner images are stored in the Docker volume `<container>-docker` on the host, mounted at `~/.local/share/docker` in the workspace.
+- After `stop.sh` and `attach.sh`, inner images are still there, but inner containers that were running are stopped. Start them again with `docker start` or `docker compose up`.
+- A stopped container still holds its memory and CPU settings, but uses no GPU, memory or CPU until restarted. Its volume and disk space are kept, so `destroy.sh` containers you no longer need.
+- To keep images even after `destroy.sh`, use one shared volume: set the volume line in `run.sh` to `-v "${NAME}-docker-data":/home/${NAME}/.local/share/docker` and remove the `docker volume rm` line from `destroy.sh`. Only one running container may use it at a time.
 
 ### Run modes
 
@@ -96,6 +113,7 @@ nvidia-smi                        # shows only your assigned GPU (server only)
 ### Notes
 
 - Never mount the host's `/var/run/docker.sock` into the workspace, and never use `--privileged` on a shared server.
-- Inner images live in the Docker volume `<container>-docker` and are deleted by `stop.sh`.
+- Inner images live in the Docker volume `<container>-docker` and are deleted only by `destroy.sh`.
+- `newuidmap`/`newgidmap` use file capabilities instead of the setuid bit, which fixes rootless Docker on hosts where Docker is installed as a snap.
 - Always rebuild on the machine you will run on, since architectures may differ.
 - Inner daemon log: `~/dockerd.log` inside the container.
