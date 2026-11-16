@@ -14,7 +14,7 @@ harbor run \
     --n-concurrent 6 \
     --ak "config=config/config.toml" \
     --ae "OPENROUTER_API_KEY=$OPENROUTER_API_KEY" \
-    --agent-timeout-multiplier 1 \
+    --agent-timeout-multiplier 0 \
     --verifier-timeout-multiplier 10 \
     --agent-setup-timeout-multiplier 10 \
     --environment-build-timeout-multiplier 10 \

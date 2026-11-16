@@ -12,7 +12,7 @@ harbor run \
     -a mini-swe-agent \
     -m "$model" \
     --n-concurrent 6 \
-    --agent-timeout-multiplier 1 \
+    --agent-timeout-multiplier 0 \
     --verifier-timeout-multiplier 10 \
     --agent-setup-timeout-multiplier 10 \
     --environment-build-timeout-multiplier 10  \
