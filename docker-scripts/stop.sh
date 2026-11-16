@@ -7,15 +7,13 @@ IMAGE="${PREFIX}"
 
 usage() {
   echo "Usage: $0 <suffix|full-name> [more ...]"
-  echo "  e.g. $0 1            -> stops and removes ${PREFIX}-1"
-  echo "       $0 ${PREFIX}-exp-a"
-  echo "Only containers named ${PREFIX}-<suffix> (created from image ${IMAGE}) are allowed."
+  echo "  e.g. $0 1   -> stops ${PREFIX}-1 (container and inner Docker data are kept)"
+  echo "Restart with ./attach.sh <suffix>. To delete everything, use ./destroy.sh."
   exit 1
 }
 
 [ $# -ge 1 ] || usage
 
-TARGETS=()
 for arg in "$@"; do
   case "$arg" in
     "${PREFIX}-"*) cname="$arg" ;;
@@ -39,28 +37,13 @@ for arg in "$@"; do
     exit 1
   fi
 
-  TARGETS+=("$cname")
-done
+  state="$(docker inspect -f '{{.State.Status}}' "$cname")"
+  if [ "$state" != "running" ]; then
+    echo "${cname} is already stopped (${state})."
+    continue
+  fi
 
-echo "The following containers will be STOPPED and REMOVED:"
-for c in "${TARGETS[@]}"; do
-  state="$(docker inspect -f '{{.State.Status}}' "$c")"
-  echo "  - ${c} (${state})"
-done
-echo "Note: data inside the container (outside /workspace) will be lost,"
-echo "      including ALL inner Docker images, containers and volumes."
-
-read -r -p "Proceed? (y/N): " answer
-case "$answer" in
-  [yY]|[yY][eE][sS]) ;;
-  *) echo "Aborted."; exit 0 ;;
-esac
-
-for c in "${TARGETS[@]}"; do
-  echo "Stopping ${c}..."
-  docker stop -t 60 "$c" >/dev/null      # time for the inner dockerd to shut down
-  echo "Removing ${c}..."
-  docker rm -v "$c" >/dev/null
-  docker volume rm -f "${c}-docker" >/dev/null   # inner Docker data
-  echo "Done: ${c}"
+  echo "Stopping ${cname}..."
+  docker stop -t 60 "$cname" >/dev/null     # time for the inner dockerd to shut down
+  echo "Stopped: ${cname} (data kept; restart with ./attach.sh ${cname#${PREFIX}-})"
 done

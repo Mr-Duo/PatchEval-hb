@@ -42,6 +42,12 @@ https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CO
         docker-ce-rootless-extras uidmap slirp4netns fuse-overlayfs \
     && rm -rf /var/lib/apt/lists/*
 
+RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin \
+    && chmod u-s /usr/bin/newuidmap /usr/bin/newgidmap \
+    && setcap cap_setuid=ep /usr/bin/newuidmap \
+    && setcap cap_setgid=ep /usr/bin/newgidmap \
+    && rm -rf /var/lib/apt/lists/*
+
 # Non-root user matching host UID/GID.
 # If the GID already exists in the image (e.g. 20 = dialout), reuse it.
 ARG USERNAME=dev

@@ -43,7 +43,7 @@ if [ -n "$SUFFIX" ]; then
   CONTAINER="${PREFIX}-${SUFFIX}"
   if container_exists "$CONTAINER"; then
     echo "Error: container '${CONTAINER}' already exists." >&2
-    echo "Pick another suffix, or remove it with: ./stop.sh ${SUFFIX}" >&2
+    echo "Pick another suffix, re-attach with ./attach.sh ${SUFFIX}, or delete it with ./destroy.sh ${SUFFIX}" >&2
     exit 1
   fi
 else
@@ -110,7 +110,7 @@ for _ in $(seq 1 60); do
   if ! docker ps --format '{{.Names}}' | grep -qx "${CONTAINER}"; then
     echo; echo "Container exited. Logs:" >&2
     docker logs "${CONTAINER}" >&2 || true
-    echo "Clean up with: ./stop.sh ${CONTAINER#${PREFIX}-}" >&2
+    echo "Clean up with: ./destroy.sh ${CONTAINER#${PREFIX}-}" >&2
     exit 1
   fi
   docker exec "${CONTAINER}" docker info >/dev/null 2>&1 && break
