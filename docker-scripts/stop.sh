@@ -17,25 +17,21 @@ usage() {
 
 TARGETS=()
 for arg in "$@"; do
-  # Accept either the suffix or the full container name
   case "$arg" in
     "${PREFIX}-"*) cname="$arg" ;;
     *)             cname="${PREFIX}-${arg}" ;;
   esac
 
-  # Must be exactly ${PREFIX}-<non-empty suffix>, with safe characters only
   if ! [[ "$cname" =~ ^${PREFIX}-[A-Za-z0-9_.-]+$ ]]; then
     echo "Error: '${arg}' is not a valid ${PREFIX}-<suffix> name." >&2
     exit 1
   fi
 
-  # Must exist (exact match)
   if ! docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
     echo "Error: container '${cname}' does not exist." >&2
     exit 1
   fi
 
-  # Must be built from your image
   img="$(docker inspect -f '{{.Config.Image}}' "$cname")"
   img="${img%%:*}"
   if [ "$img" != "$IMAGE" ]; then
@@ -51,7 +47,8 @@ for c in "${TARGETS[@]}"; do
   state="$(docker inspect -f '{{.State.Status}}' "$c")"
   echo "  - ${c} (${state})"
 done
-echo "Note: data inside the container (outside mounted volumes) will be lost."
+echo "Note: data inside the container (outside /workspace) will be lost,"
+echo "      including ALL inner Docker images, containers and volumes."
 
 read -r -p "Proceed? (y/N): " answer
 case "$answer" in
@@ -61,8 +58,9 @@ esac
 
 for c in "${TARGETS[@]}"; do
   echo "Stopping ${c}..."
-  docker stop "$c" >/dev/null
+  docker stop -t 60 "$c" >/dev/null      # time for the inner dockerd to shut down
   echo "Removing ${c}..."
-  docker rm "$c" >/dev/null
+  docker rm -v "$c" >/dev/null
+  docker volume rm -f "${c}-docker" >/dev/null   # inner Docker data
   echo "Done: ${c}"
 done

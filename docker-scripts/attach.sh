@@ -11,5 +11,8 @@ case "$1" in
   *)             cname="${PREFIX}-$1" ;;
 esac
 
-exec docker exec -it -u "${NAME}" -w /workspace "${cname}" \
+# Only attach to your own workspace containers
+[[ "$cname" =~ ^${PREFIX}-[A-Za-z0-9_.-]+$ ]] || { echo "Invalid name: $cname" >&2; exit 1; }
+
+exec docker exec -it -w /workspace "${cname}" \
   tmux new-session -A -s "${2:-main}"

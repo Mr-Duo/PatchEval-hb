@@ -6,26 +6,28 @@ IMAGE="${NAME}-workspace:latest"
 PREFIX="${NAME}-workspace"
 
 # ---- Resource settings (edit as needed) ----
-GPUS='"device=0"'      # e.g. '"device=0,1"' or 'all'
+GPUS='"device=0"'      # your assigned GPU, e.g. '"device=0"'
 MEMORY="32g"
 CPUS="8"
 SHM_SIZE="8g"
-MODE="privileged"      # "privileged" or "sysbox" (sysbox must be installed on the host)
+MODE="rootless"        # "rootless" (default, safe) or "privileged" (local testing only)
 # --------------------------------------------
 
 usage() {
-  echo "Usage: $0 [-s suffix] [-d project_dir]"
+  echo "Usage: $0 [-s suffix] [-d project_dir] [-m rootless|privileged]"
   echo "  -s  container suffix -> ${PREFIX}-<suffix> (default: first free number 1, 2, 3, ...)"
   echo "  -d  host directory mounted at /workspace (default: current directory)"
+  echo "  -m  run mode (default: ${MODE})"
   exit 1
 }
 
 SUFFIX=""
 WORKDIR_HOST="$(pwd)"
-while getopts "s:d:h" opt; do
+while getopts "s:d:m:h" opt; do
   case "$opt" in
     s) SUFFIX="$OPTARG" ;;
     d) WORKDIR_HOST="$OPTARG" ;;
+    m) MODE="$OPTARG" ;;
     *) usage ;;
   esac
 done
@@ -52,6 +54,24 @@ else
   CONTAINER="${PREFIX}-${i}"
 fi
 
+# GPU: only pass --gpus if the host Docker has an NVIDIA runtime
+HAS_NVIDIA=0
+GPU_ARGS=()
+if docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q nvidia; then
+  HAS_NVIDIA=1
+  GPU_ARGS=(--gpus "${GPUS}")
+else
+  echo "No NVIDIA runtime on this host: starting without GPU."
+fi
+
+# Guardrail: privileged on a GPU server defeats the one-GPU policy
+if [ "$MODE" = "privileged" ] && [ "$HAS_NVIDIA" = "1" ]; then
+  echo "WARNING: privileged mode on a GPU host exposes ALL host devices and disks."
+  echo "         It bypasses the one-GPU limit and can affect other users."
+  read -r -p "Continue anyway? (y/N): " ans
+  case "$ans" in [yY]|[yY][eE][sS]) ;; *) echo "Aborted."; exit 0 ;; esac
+fi
+
 echo "Starting container: ${CONTAINER} (mode: ${MODE})"
 
 COMMON_ARGS=(
@@ -62,29 +82,26 @@ COMMON_ARGS=(
   --shm-size "${SHM_SIZE}"
   --pids-limit 4096
   -v "${WORKDIR_HOST}":/workspace
+  -v "${CONTAINER}-docker":/home/${NAME}/.local/share/docker
 )
 
-GPU_ARGS=()
-if docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q nvidia; then
-  GPU_ARGS=(--gpus "${GPUS}")
-else
-  echo "No NVIDIA runtime on this host: starting without GPU."
-fi
-
 case "$MODE" in
+  rootless)
+    docker run "${COMMON_ARGS[@]}" \
+      ${GPU_ARGS[@]+"${GPU_ARGS[@]}"} \
+      --security-opt seccomp=unconfined \
+      --security-opt apparmor=unconfined \
+      --security-opt systempaths=unconfined \
+      --device /dev/net/tun --device /dev/fuse \
+      "${IMAGE}" >/dev/null
+    ;;
   privileged)
     docker run "${COMMON_ARGS[@]}" \
-      --privileged \
       ${GPU_ARGS[@]+"${GPU_ARGS[@]}"} \
-      -v "${CONTAINER}-docker":/var/lib/docker \
+      --privileged \
       "${IMAGE}" >/dev/null
     ;;
-  sysbox)
-    docker run "${COMMON_ARGS[@]}" \
-      --runtime=sysbox-runc \
-      "${IMAGE}" >/dev/null
-    ;;
-  *) echo "Error: unknown MODE '${MODE}'" >&2; exit 1 ;;
+  *) echo "Error: unknown MODE '${MODE}' (use rootless or privileged)" >&2; exit 1 ;;
 esac
 
 # Wait for the inner dockerd to come up
@@ -93,6 +110,7 @@ for _ in $(seq 1 60); do
   if ! docker ps --format '{{.Names}}' | grep -qx "${CONTAINER}"; then
     echo; echo "Container exited. Logs:" >&2
     docker logs "${CONTAINER}" >&2 || true
+    echo "Clean up with: ./stop.sh ${CONTAINER#${PREFIX}-}" >&2
     exit 1
   fi
   docker exec "${CONTAINER}" docker info >/dev/null 2>&1 && break
@@ -101,5 +119,5 @@ done
 echo " ready."
 
 echo "Attaching (detach with Ctrl-a d; re-attach with ./attach.sh ${CONTAINER#${PREFIX}-})"
-exec docker exec -it -u "${NAME}" -w /workspace "${CONTAINER}" \
+exec docker exec -it -w /workspace "${CONTAINER}" \
   tmux new-session -A -s main

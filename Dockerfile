@@ -1,34 +1,13 @@
 # syntax=docker/dockerfile:1
 # ---------------------------------------------------------------
-# GPU-ready dev environment with true Docker-in-Docker + tmux
+# GPU-ready dev workspace with rootless Docker-in-Docker + tmux
 #
-# Build:
-#   docker build \
-#     --build-arg UID=$(id -u) --build-arg GID=$(id -g) --build-arg USERNAME=$(whoami) \
-#     -t $(whoami)/work:latest .
+# The inner dockerd runs as an unprivileged user INSIDE the container.
+# The host's docker.sock is never mounted, so this container cannot see
+# or touch other users' containers. The GPU (--gpus) goes to the
+# workspace only; inner containers are CPU-only.
 #
-# Run, option A (recommended on a shared server): Sysbox runtime, no --privileged
-#   docker run -d --init --runtime=sysbox-runc \
-#     --name $(whoami)-work \
-#     --memory 32g --memory-swap 32g --cpus 8 --shm-size 8g \
-#     -v /path/to/your/project:/workspace \
-#     $(whoami)/work:latest
-#
-# Run, option B (no Sysbox): --privileged
-#   docker run -d --init --privileged \
-#     --name $(whoami)-work \
-#     --gpus '"device=0"' \
-#     --memory 32g --memory-swap 32g --cpus 8 --shm-size 8g \
-#     -v docker-data-$(whoami):/var/lib/docker \
-#     -v /path/to/your/project:/workspace \
-#     $(whoami)/work:latest
-#
-# Attach as yourself, in a persistent tmux session:
-#   docker exec -it -u $(whoami) $(whoami)-work tmux new-session -A -s main
-#
-# Inner daemon logs: docker exec $(whoami)-work tail -f /var/log/dockerd.log
-# Inner GPU test:    docker exec -u $(whoami) $(whoami)-work \
-#                      docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+# Use build.sh / run.sh / attach.sh / stop.sh rather than raw docker commands.
 # ---------------------------------------------------------------
 
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
@@ -41,17 +20,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TERM=xterm-256color \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
-# System packages (iptables/iproute2/kmod etc. are needed by dockerd)
+# System packages (iptables/iproute2 are needed by the rootless daemon's network namespace)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv python-is-python3 \
         git curl wget vim nano tmux htop build-essential ca-certificates \
         gnupg lsb-release tzdata less jq unzip openssh-client \
-        iptables iproute2 kmod pigz xz-utils e2fsprogs \
+        iptables iproute2 kmod pigz xz-utils \
     && update-alternatives --set iptables  /usr/sbin/iptables-legacy \
     && update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy \
     && rm -rf /var/lib/apt/lists/*
 
-# Full Docker Engine (daemon + CLI + compose + buildx)
+# Docker Engine + rootless extras
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
     && chmod a+r /etc/apt/keyrings/docker.asc \
@@ -60,27 +39,18 @@ https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CO
         > /etc/apt/sources.list.d/docker.list \
     && apt-get update && apt-get install -y --no-install-recommends \
         docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
+        docker-ce-rootless-extras uidmap slirp4netns fuse-overlayfs \
     && rm -rf /var/lib/apt/lists/*
 
-# NVIDIA Container Toolkit so INNER containers can use the GPU too
-RUN curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-        | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
-    && curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
-        | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-        > /etc/apt/sources.list.d/nvidia-container-toolkit.list \
-    && apt-get update && apt-get install -y --no-install-recommends nvidia-container-toolkit \
-    && nvidia-ctk runtime configure --runtime=docker \
-    # nested containers usually can't manage device cgroups themselves
-    && nvidia-ctk config --set nvidia-container-cli.no-cgroups --in-place \
-    && rm -rf /var/lib/apt/lists/*
-
-# Non-root user matching host UID/GID, in the (inner) docker group
+# Non-root user matching host UID/GID.
+# If the GID already exists in the image (e.g. 20 = dialout), reuse it.
 ARG USERNAME=dev
 ARG UID=1000
 ARG GID=1000
 RUN (getent group ${GID} >/dev/null || groupadd -g ${GID} ${USERNAME}) \
     && useradd -m -u ${UID} -g ${GID} -s /bin/bash ${USERNAME} \
-    && usermod -aG docker ${USERNAME}
+    && (grep -q "^${USERNAME}:" /etc/subuid || echo "${USERNAME}:100000:65536" >> /etc/subuid) \
+    && (grep -q "^${USERNAME}:" /etc/subgid || echo "${USERNAME}:100000:65536" >> /etc/subgid)
 
 # tmux config (system-wide)
 RUN cat > /etc/tmux.conf <<'EOF'
@@ -102,40 +72,53 @@ bind c new-window -c "#{pane_current_path}"
 bind r source-file /etc/tmux.conf \; display "reloaded"
 EOF
 
-# Entrypoint: start the inner Docker daemon, wait until ready, then run CMD
+# Entrypoint: start the rootless inner dockerd, wait until ready, run CMD, stop cleanly
 RUN cat > /usr/local/bin/entrypoint.sh <<'EOF'
 #!/usr/bin/env bash
 set -e
-rm -f /var/run/docker.pid /var/run/docker.sock
-dockerd --host=unix:///var/run/docker.sock --group docker \
-    > /var/log/dockerd.log 2>&1 &
-DOCKERD_PID=$!
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+rm -rf "$XDG_RUNTIME_DIR"/* 2>/dev/null || true
+
+dockerd-rootless.sh > "$HOME/dockerd.log" 2>&1 &
+DPID=$!
+
 for _ in $(seq 1 60); do
     docker info >/dev/null 2>&1 && break
+    kill -0 "$DPID" 2>/dev/null || break
     sleep 1
 done
-docker info >/dev/null 2>&1 || { echo "dockerd failed to start:" >&2; tail -n 50 /var/log/dockerd.log >&2; exit 1; }
+if ! docker info >/dev/null 2>&1; then
+    echo "Inner dockerd failed to start. Last log lines:" >&2
+    tail -n 50 "$HOME/dockerd.log" >&2
+    exit 1
+fi
 
-trap 'kill -TERM "$DOCKERD_PID" 2>/dev/null; wait "$DOCKERD_PID" 2>/dev/null; exit 0' TERM INT
+trap 'kill -TERM "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null; exit 0' TERM INT
 "$@" &
 wait $!
 EOF
 RUN chmod +x /usr/local/bin/entrypoint.sh \
     && git config --system --add safe.directory '*'
 
+# Workspace + inner Docker data dir (created and owned by the user BEFORE the
+# VOLUME line, so the named volume inherits the right ownership)
 WORKDIR /workspace
-RUN chown ${UID}:${GID} /workspace
+RUN chown ${UID}:${GID} /workspace \
+    && mkdir -p /home/${USERNAME}/.local/share/docker /home/${USERNAME}/.run \
+    && chown -R ${UID}:${GID} /home/${USERNAME}/.local /home/${USERNAME}/.run
+VOLUME /home/${USERNAME}/.local/share/docker
 
-# Python deps installed as the normal user
+ENV XDG_RUNTIME_DIR=/home/${USERNAME}/.run \
+    DOCKER_HOST=unix:///home/${USERNAME}/.run/docker.sock \
+    PATH="/home/${USERNAME}/.local/bin:${PATH}"
+
 USER ${USERNAME}
-ENV PATH="/home/${USERNAME}/.local/bin:${PATH}"
+
+# Python dependencies (edit requirements.txt for your project)
 COPY --chown=${UID}:${GID} requirements.txt* /tmp/
 RUN python -m pip install --upgrade pip \
     && if [ -f /tmp/requirements.txt ]; then pip install -r /tmp/requirements.txt; fi
 # RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
-# Back to root: dockerd must start as root. Use `docker exec -u <you>` to log in.
-USER root
-VOLUME /var/lib/docker
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["sleep", "infinity"]
