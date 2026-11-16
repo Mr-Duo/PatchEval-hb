@@ -1,4 +1,7 @@
 #!/bin/bash
+# This script will run all 230 tasks in the tasks folder
+# To run a subset of tasks, please create another folder contain the tasks you want to run,
+# then point the dataset variable to it
 
 dataset="tasks"
 model="openrouter/openai/gpt-6-luna"
