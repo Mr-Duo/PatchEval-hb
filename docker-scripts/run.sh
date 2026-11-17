@@ -14,19 +14,22 @@ MODE="rootless"        # "rootless" (default, safe) or "privileged" (local testi
 # --------------------------------------------
 
 usage() {
-  echo "Usage: $0 [-s suffix] [-d project_dir] [-m rootless|privileged]"
+  echo "Usage: $0 [-s suffix] [-d project_dir] [-D docker_data_dir] [-m rootless|privileged]"
   echo "  -s  container suffix -> ${PREFIX}-<suffix> (default: first free number 1, 2, 3, ...)"
   echo "  -d  host directory mounted at /workspace (default: current directory)"
+  echo "  -D  host directory for the inner Docker data (default: <parent of project_dir>/docker-data/<container>)"
   echo "  -m  run mode (default: ${MODE})"
   exit 1
 }
 
 SUFFIX=""
 WORKDIR_HOST="$(pwd)"
-while getopts "s:d:m:h" opt; do
+DOCKER_DATA_HOST=""
+while getopts "s:d:D:m:h" opt; do
   case "$opt" in
     s) SUFFIX="$OPTARG" ;;
     d) WORKDIR_HOST="$OPTARG" ;;
+    D) DOCKER_DATA_HOST="$OPTARG" ;;
     m) MODE="$OPTARG" ;;
     *) usage ;;
   esac
@@ -72,6 +75,14 @@ if [ "$MODE" = "privileged" ] && [ "$HAS_NVIDIA" = "1" ]; then
   case "$ans" in [yY]|[yY][eE][sS]) ;; *) echo "Aborted."; exit 0 ;; esac
 fi
 
+# Inner Docker data dir: use -D if given, else a sibling of the workspace dir
+if [ -z "$DOCKER_DATA_HOST" ]; then
+  DOCKER_DATA_HOST="$(dirname "${WORKDIR_HOST}")/docker-data/${CONTAINER}"
+fi
+mkdir -p "$DOCKER_DATA_HOST"
+DOCKER_DATA_HOST="$(cd "$DOCKER_DATA_HOST" && pwd)"   # absolute path, required for -v
+echo "Inner Docker data: ${DOCKER_DATA_HOST}"
+
 echo "Starting container: ${CONTAINER} (mode: ${MODE})"
 
 COMMON_ARGS=(
@@ -82,7 +93,7 @@ COMMON_ARGS=(
   --shm-size "${SHM_SIZE}"
   --pids-limit 4096
   -v "${WORKDIR_HOST}":/workspace
-  -v "${CONTAINER}-docker":/home/${NAME}/.local/share/docker
+  -v "${DOCKER_DATA_HOST}":/home/${NAME}/.local/share/docker
 )
 
 case "$MODE" in
